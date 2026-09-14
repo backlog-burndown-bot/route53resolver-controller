@@ -42,6 +42,10 @@ CHECK_STATUS_WAIT_SECONDS = 10
 IP_SWAP_TIMEOUT_SECONDS = 600
 IP_SWAP_INTERVAL_SECONDS = 15
 
+# Endpoint creation provisions ENIs, so allow generous time for the controller to
+# write its first status.
+CREATE_WAIT_PERIODS = 30
+
 @pytest.fixture
 def resolver_endpoint():
     resolver_endpoint = random_suffix_name("resolver-endpoint", 32)
@@ -72,6 +76,12 @@ def resolver_endpoint():
 
     assert cr is not None
     assert k8s.get_resource_exists(ref)
+
+    # wait_resource_consumed_by_controller returns once the controller has taken
+    # ownership, which can precede its first status write. Wait for the synced
+    # condition and re-read, so consumers see a populated status.
+    assert k8s.wait_on_condition(ref, "ACK.ResourceSynced", "True", wait_periods=CREATE_WAIT_PERIODS)
+    cr = k8s.get_resource(ref)
 
     yield (ref, cr)
 
@@ -110,6 +120,11 @@ def resolver_endpoint_adopt():
     k8s.create_custom_resource(ref, resource_data)
     cr = k8s.wait_resource_consumed_by_controller(ref)
 
+    # The endpoint's ID is what we adopt by, so wait for the controller to write
+    # it rather than racing its first status write.
+    assert k8s.wait_on_condition(ref, "ACK.ResourceSynced", "True", wait_periods=CREATE_WAIT_PERIODS)
+    cr = k8s.get_resource(ref)
+
     resolver_id = cr["status"]["id"]
 
     assert cr is not None
@@ -136,6 +151,9 @@ def resolver_endpoint_adopt():
     cr = k8s.wait_resource_consumed_by_controller(ref)
     assert cr is not None
     assert k8s.get_resource_exists(ref)
+
+    assert k8s.wait_on_condition(ref, "ACK.ResourceSynced", "True", wait_periods=CREATE_WAIT_PERIODS)
+    cr = k8s.get_resource(ref)
 
     yield (ref, cr)
 
