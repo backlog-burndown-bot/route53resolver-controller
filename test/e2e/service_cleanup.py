@@ -78,17 +78,36 @@ def list_endpoints_in_vpcs(vpc_ids: list) -> list:
     return endpoint_ids
 
 
-def disassociate_rules_from_vpcs(vpc_ids: list):
-    """Disassociate every Resolver rule associated with the given VPCs.
+def rules_for_endpoints(endpoint_ids: list) -> list:
+    """Return the IDs of every Resolver rule that forwards to one of the given
+    endpoints.
+
+    Rules with no endpoint are skipped, which excludes the RECURSIVE rule AWS
+    auto-defines per VPC. That rule cannot be disassociated
+    ([RSLVR-00713]) and is not ours to remove.
+    """
+    if not endpoint_ids:
+        return []
+
+    r53r = route53resolver_client()
+    rule_ids = []
+    for rule in _list_all(r53r.list_resolver_rules, "ResolverRules"):
+        if rule.get("ResolverEndpointId") in endpoint_ids:
+            rule_ids.append(rule["Id"])
+    return rule_ids
+
+
+def disassociate_rules(rule_ids: list):
+    """Disassociate the given rules from every VPC they are associated with.
 
     A rule cannot be deleted while it is associated with a VPC.
     """
     r53r = route53resolver_client()
-    for vpc_id in vpc_ids:
+    for rule_id in rule_ids:
         associations = _list_all(
             r53r.list_resolver_rule_associations,
             "ResolverRuleAssociations",
-            Filters=[{"Name": "VPCId", "Values": [vpc_id]}],
+            Filters=[{"Name": "ResolverRuleId", "Values": [rule_id]}],
         )
         for association in associations:
             r53r.disassociate_resolver_rule(
@@ -101,20 +120,15 @@ def disassociate_rules_from_vpcs(vpc_ids: list):
             )
 
 
-def delete_rules_for_endpoints(endpoint_ids: list):
-    """Delete every Resolver rule that forwards to one of the given endpoints.
+def delete_rules(rule_ids: list):
+    """Delete the given Resolver rules.
 
-    An endpoint cannot be deleted while a rule still targets it. Rules with no
-    endpoint (SYSTEM and RECURSIVE rules) are left alone.
+    An endpoint cannot be deleted while a rule still targets it.
     """
-    if not endpoint_ids:
-        return
-
     r53r = route53resolver_client()
-    for rule in _list_all(r53r.list_resolver_rules, "ResolverRules"):
-        if rule.get("ResolverEndpointId") in endpoint_ids:
-            r53r.delete_resolver_rule(ResolverRuleId=rule["Id"])
-            logging.info(f"Deleted Resolver rule {rule['Id']}")
+    for rule_id in rule_ids:
+        r53r.delete_resolver_rule(ResolverRuleId=rule_id)
+        logging.info(f"Deleted Resolver rule {rule_id}")
 
 
 def disassociate_query_log_configs_from_vpcs(vpc_ids: list):
@@ -222,15 +236,21 @@ def service_cleanup():
             f"Unable to delete query log configs for bucket {resources.QueryLogBucket.name}"
         )
 
+    rule_ids = []
     try:
-        disassociate_rules_from_vpcs(vpc_ids)
+        rule_ids = rules_for_endpoints(endpoint_ids)
     except Exception:
-        logging.exception(f"Unable to disassociate Resolver rules from {vpc_ids}")
+        logging.exception(f"Unable to list Resolver rules for {endpoint_ids}")
 
     try:
-        delete_rules_for_endpoints(endpoint_ids)
+        disassociate_rules(rule_ids)
     except Exception:
-        logging.exception(f"Unable to delete Resolver rules for {endpoint_ids}")
+        logging.exception(f"Unable to disassociate Resolver rules {rule_ids}")
+
+    try:
+        delete_rules(rule_ids)
+    except Exception:
+        logging.exception(f"Unable to delete Resolver rules {rule_ids}")
 
     try:
         delete_endpoints(endpoint_ids)
